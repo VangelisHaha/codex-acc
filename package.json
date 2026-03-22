@@ -1,0 +1,51 @@
+{
+  "name": "codex-acc",
+  "version": "1.0.0",
+  "description": "Manage multiple Codex accounts and switch between them with one command",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "codex-cc": "./bin/codex-cc.js"
+  },
+  "scripts": {
+    "test": "node bin/codex-cc.js --help"
+  },
+  "keywords": [
+    "codex",
+    "openai",
+    "cli",
+    "account",
+    "switcher",
+    "multi-account"
+  ],
+  "author": "vangelis.wang",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chalk": "^5.5.0",
+    "cli-table3": "^0.6.5",
+    "inquirer": "^12.9.4",
+    "node-fetch": "^3.3.2",
+    "proxy-agent": "^6.4.0"
+  },
+  "files": [
+    "bin",
+    "src",
+    "utils",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VangelisHaha/codex-acc.git"
+  },
+  "homepage": "https://github.com/VangelisHaha/codex-acc#readme",
+  "bugs": {
+    "url": "https://github.com/VangelisHaha/codex-acc/issues"
+  }
+}
