@@ -102,6 +102,8 @@ codex-cc login
 
 此命令会启动原生 `codex login` 流程，登录完成后提示你输入一个别名（如 `163`、`gmail`、`work`），账号将以该别名保存到本地。
 
+如果当前 `~/.codex/auth.json` 已经存在登录态，但还没加入 `codex-cc` 列表，那么执行 `codex-cc`、`codex-cc list` 或 `codex-cc <别名>` 时，会自动将该账号加入列表，默认别名优先使用 `default`。
+
 ### 第二步：启动 Codex（交互式选择）
 
 ```bash
@@ -133,6 +135,7 @@ codex-cc work -q "帮我写一个快排算法"
 | `codex-cc login` | 登录 Codex 并保存账号 |
 | `codex-cc list` | 查看所有账号及实时额度 |
 | `codex-cc clear` | 删除当前 `~/.codex/auth.json`（退出登录） |
+| `codex-cc rename <旧别名> <新别名>` | 重命名已保存账号别名 |
 | `codex-cc <别名>` | 切换到指定账号并启动 codex |
 | `codex-cc <别名> [参数...]` | 切换账号后透传参数给 codex |
 | `codex-cc --help` | 显示帮助信息 |
@@ -216,6 +219,16 @@ npm install -g @openai/codex
 **Q: 如何删除某个账号？**
 
 直接编辑 `~/.codex/codex-cc.json`，删除对应别名的条目后保存即可。
+
+**Q: 如何重命名某个账号别名？**
+
+直接执行：
+
+```bash
+codex-cc rename default work
+```
+
+如果重命名的是当前账号，脚本会同步更新当前账号标记。
 
 **Q: Windows 下能用吗？**
 

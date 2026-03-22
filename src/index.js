@@ -7,6 +7,7 @@ import chalk from 'chalk';
 import Table from 'cli-table3';
 import {
     extractAccountInfo,
+    extractAuthState,
     fetchRealtimeUsage,
     normalizeUsageText,
     pickRealtimeLimits
@@ -18,13 +19,14 @@ const logger = createLogger('CODEX-CC');
 const CODEX_DIR = path.join(os.homedir(), '.codex');
 const AUTH_FILE = path.join(CODEX_DIR, 'auth.json');
 const STORE_FILE = path.join(CODEX_DIR, 'codex-cc.json');
-const RESERVED_COMMANDS = new Set(['login', 'list', 'clear', 'help']);
+const RESERVED_COMMANDS = new Set(['login', 'list', 'clear', 'rename', 'help']);
 
 export async function execute(args = []) {
     ensureCodexDir();
     const [command, ...restArgs] = args;
     const store = loadStore();
     migrateStore(store);
+    await ensureCurrentAuthProfile(store, command);
 
     if (!command) {
         await handleInteractiveLaunch(store);
@@ -42,6 +44,10 @@ export async function execute(args = []) {
         handleClear();
         return;
     }
+    if (command === 'rename') {
+        await handleRename(store, restArgs);
+        return;
+    }
     if (command === 'help' || command === '-h' || command === '--help') {
         printHelp();
         return;
@@ -54,7 +60,37 @@ function printHelp() {
     console.log('  codex-cc login                       登录 Codex 并保存为别名账号');
     console.log('  codex-cc list                        查看已保存账号和额度');
     console.log('  codex-cc clear                       删除当前 ~/.codex/auth.json');
+    console.log('  codex-cc rename <旧别名> <新别名>    重命名已保存账号别名');
     console.log('  codex-cc <别名> [Codex 参数]         切换指定账号并启动 codex');
+}
+
+async function ensureCurrentAuthProfile(store, command) {
+    if (!shouldAutoAddCurrentProfile(command)) {
+        return;
+    }
+    const currentAuth = readAuthFile();
+    if (!currentAuth) {
+        return;
+    }
+    const matchedAlias = findMatchingAlias(store, currentAuth);
+    if (matchedAlias) {
+        if (store.current !== matchedAlias) {
+            store.current = matchedAlias;
+            saveStore(store);
+        }
+        return;
+    }
+    const alias = resolveAutoAddedAlias(store);
+    const profile = await buildProfileSnapshot(currentAuth, alias);
+    profile.alias = alias;
+    store.profiles[alias] = profile;
+    store.current = alias;
+    saveStore(store);
+    logger.info(`检测到当前登录态未加入账号列表，已自动保存为别名 ${alias}`);
+}
+
+function shouldAutoAddCurrentProfile(command) {
+    return !command || !['login', 'clear', 'rename', 'help', '-h', '--help'].includes(command);
 }
 
 async function handleInteractiveLaunch(store) {
@@ -174,6 +210,47 @@ function handleClear() {
     }
 }
 
+async function handleRename(store, args = []) {
+    const [sourceAlias, targetAliasInput] = args;
+    if (!sourceAlias || !targetAliasInput) {
+        logger.error('用法: codex-cc rename <旧别名> <新别名>');
+        process.exitCode = 1;
+        return;
+    }
+    if (!store.profiles[sourceAlias]) {
+        logger.error(`账号别名 ${sourceAlias} 不存在。`);
+        process.exitCode = 1;
+        return;
+    }
+    const targetValidation = validateAlias(targetAliasInput);
+    if (targetValidation !== true) {
+        logger.error(String(targetValidation));
+        process.exitCode = 1;
+        return;
+    }
+    const targetAlias = targetAliasInput.trim();
+    if (sourceAlias === targetAlias) {
+        logger.info(`别名未变化，仍为 ${sourceAlias}`);
+        return;
+    }
+    if (store.profiles[targetAlias]) {
+        logger.error(`目标别名 ${targetAlias} 已存在。`);
+        process.exitCode = 1;
+        return;
+    }
+    const profile = {
+        ...store.profiles[sourceAlias],
+        alias: targetAlias
+    };
+    delete store.profiles[sourceAlias];
+    store.profiles[targetAlias] = profile;
+    if (store.current === sourceAlias) {
+        store.current = targetAlias;
+    }
+    saveStore(store);
+    logger.success(`已将账号别名 ${sourceAlias} 重命名为 ${targetAlias}`);
+}
+
 async function launchProfile(store, alias, codexArgs = []) {
     const profile = store.profiles[alias];
     if (!profile) {
@@ -264,6 +341,50 @@ function buildProfileFromAuth(alias, auth, overrides = {}) {
 
 async function buildProfileSnapshot(auth, alias) {
     return (await refreshProfileUsage(buildProfileFromAuth(alias || '', auth))).profile;
+}
+
+function findMatchingAlias(store, auth) {
+    const targetAccount = extractAccountInfo(auth);
+    const targetState = extractAuthState(auth);
+    for (const alias of listProfileAliases(store)) {
+        const profile = store.profiles[alias];
+        if (isSameAccount(profile, targetAccount, targetState)) {
+            return alias;
+        }
+    }
+    return '';
+}
+
+function isSameAccount(profile, targetAccount, targetState) {
+    const profileAccount = profile?.account || {};
+    const profileState = extractAuthState(profile?.auth);
+    if (profileAccount.accountId && targetAccount.accountId && profileAccount.accountId === targetAccount.accountId) {
+        return true;
+    }
+    if (profileAccount.userId && targetAccount.userId && profileAccount.userId === targetAccount.userId) {
+        return true;
+    }
+    if (profileAccount.email && targetAccount.email && profileAccount.email === targetAccount.email) {
+        return true;
+    }
+    if (profileState.accessToken && targetState.accessToken && profileState.accessToken === targetState.accessToken) {
+        return true;
+    }
+    if (profileState.idToken && targetState.idToken && profileState.idToken === targetState.idToken) {
+        return true;
+    }
+    return false;
+}
+
+function resolveAutoAddedAlias(store) {
+    if (!store.profiles.default) {
+        return 'default';
+    }
+    let index = 2;
+    while (store.profiles[`default-${index}`]) {
+        index += 1;
+    }
+    return `default-${index}`;
 }
 
 async function refreshProfileUsage(profile) {
