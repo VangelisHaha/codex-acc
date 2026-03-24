@@ -176,15 +176,24 @@ codex-cc work -q "帮我写一个快排算法"
 
 ## 代理配置 | Proxy Configuration
 
-如果你的网络需要通过代理访问 ChatGPT API，可通过以下环境变量配置：
+如果你的网络需要通过代理访问 ChatGPT API，`codex-acc` 会直接继承本机当前 shell 的代理环境变量。优先级如下：
 
 ```bash
-# 优先级从高到低
+CODEX_ACC_PROXY > HTTPS_PROXY > HTTP_PROXY > ALL_PROXY
+```
+
+例如：
+
+```bash
 export CODEX_ACC_PROXY=http://127.0.0.1:7890
-# 或使用通用环境变量
+
+# 或直接复用你本机已经设置的通用代理
 export HTTPS_PROXY=http://127.0.0.1:7890
 export HTTP_PROXY=http://127.0.0.1:7890
+export ALL_PROXY=socks5://127.0.0.1:7890
 ```
+
+也就是说，如果你本地 `codex`、浏览器或其他 CLI 已经依赖这些代理变量联网，`codex-acc` 查询额度时会走同一套代理配置，不需要额外再开一套。
 
 ---
 

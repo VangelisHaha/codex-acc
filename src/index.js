@@ -361,16 +361,27 @@ function isSameAccount(profile, targetAccount, targetState) {
     if (profileAccount.accountId && targetAccount.accountId && profileAccount.accountId === targetAccount.accountId) {
         return true;
     }
-    if (profileAccount.userId && targetAccount.userId && profileAccount.userId === targetAccount.userId) {
-        return true;
-    }
-    if (profileAccount.email && targetAccount.email && profileAccount.email === targetAccount.email) {
-        return true;
-    }
     if (profileState.accessToken && targetState.accessToken && profileState.accessToken === targetState.accessToken) {
         return true;
     }
     if (profileState.idToken && targetState.idToken && profileState.idToken === targetState.idToken) {
+        return true;
+    }
+    const hasStrongIdentity = Boolean(
+        profileAccount.accountId
+        || targetAccount.accountId
+        || profileState.accessToken
+        || targetState.accessToken
+        || profileState.idToken
+        || targetState.idToken
+    );
+    if (hasStrongIdentity) {
+        return false;
+    }
+    if (profileAccount.userId && targetAccount.userId && profileAccount.userId === targetAccount.userId) {
+        return true;
+    }
+    if (profileAccount.email && targetAccount.email && profileAccount.email === targetAccount.email) {
         return true;
     }
     return false;
