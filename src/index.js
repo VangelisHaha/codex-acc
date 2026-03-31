@@ -21,7 +21,7 @@ const logger = createLogger('CODEX-CC');
 const CODEX_DIR = path.join(os.homedir(), '.codex');
 const AUTH_FILE = path.join(CODEX_DIR, 'auth.json');
 const STORE_FILE = path.join(CODEX_DIR, 'codex-cc.json');
-const RESERVED_COMMANDS = new Set(['login', 'list', 'clear', 'rename', 'help']);
+const RESERVED_COMMANDS = new Set(['login', 'relogin', 'list', 'clear', 'rename', 'help']);
 
 export async function execute(args = []) {
     ensureCodexDir();
@@ -36,6 +36,10 @@ export async function execute(args = []) {
     }
     if (command === 'login') {
         await handleLogin(store);
+        return;
+    }
+    if (command === 'relogin') {
+        await handleRelogin(store, restArgs);
         return;
     }
     if (command === 'list') {
@@ -60,6 +64,7 @@ export async function execute(args = []) {
 function printHelp() {
     console.log(chalk.cyan('codex-cc 命令使用方式:'));
     console.log('  codex-cc login                       登录 Codex 并保存为别名账号');
+    console.log('  codex-cc relogin <别名>              重新登录并覆盖指定别名账号');
     console.log('  codex-cc list                        查看已保存账号和额度');
     console.log('  codex-cc clear                       删除当前 ~/.codex/auth.json');
     console.log('  codex-cc rename <旧别名> <新别名>    重命名已保存账号别名');
@@ -92,7 +97,7 @@ async function ensureCurrentAuthProfile(store, command) {
 }
 
 function shouldAutoAddCurrentProfile(command) {
-    return !command || !['login', 'clear', 'rename', 'help', '-h', '--help'].includes(command);
+    return !command || !['login', 'relogin', 'clear', 'rename', 'help', '-h', '--help'].includes(command);
 }
 
 async function handleInteractiveLaunch(store) {
@@ -126,20 +131,8 @@ async function handleInteractiveLaunch(store) {
 
 async function handleLogin(store) {
     const previousAuth = readAuthFile();
-    removeAuthIfExists();
-    logger.info('准备启动 codex login，请按终端提示完成登录。');
-    const exitCode = await runCodex(['login']);
-    if (exitCode !== 0) {
-        restoreAuthIfNeeded(previousAuth);
-        logger.error(`codex login 退出码: ${exitCode}`);
-        process.exitCode = exitCode || 1;
-        return;
-    }
-    const auth = readAuthFile();
+    const auth = await performCodexLogin(previousAuth);
     if (!auth) {
-        restoreAuthIfNeeded(previousAuth);
-        logger.error('登录完成后未检测到 ~/.codex/auth.json。');
-        process.exitCode = 1;
         return;
     }
     const profile = await buildProfileSnapshot(auth, null);
@@ -156,6 +149,56 @@ async function handleLogin(store) {
     logger.success(`账号已保存为别名 ${alias}`);
 }
 
+async function handleRelogin(store, args = []) {
+    const [alias] = args;
+    if (!alias) {
+        logger.error('用法: codex-cc relogin <别名>');
+        process.exitCode = 1;
+        return;
+    }
+    const existingProfile = store.profiles[alias];
+    if (!existingProfile) {
+        logger.error(`账号别名 ${alias} 不存在，请先执行 codex-cc login。`);
+        process.exitCode = 1;
+        return;
+    }
+
+    const previousAuth = readAuthFile();
+    logger.info(`准备为别名 ${alias} 重新登录，请按终端提示完成登录。`);
+    const auth = await performCodexLogin(previousAuth, {announce: false});
+    if (!auth) {
+        return;
+    }
+
+    const profile = await buildProfileSnapshot(auth, alias);
+    profile.alias = alias;
+    profile.savedAt = existingProfile.savedAt || profile.savedAt;
+    printAccountSummary(`重新登录后的账号（将覆盖别名 ${alias}）`, profile);
+
+    const answer = await safePrompt([
+        {
+            type: 'confirm',
+            name: 'overwrite',
+            message: `确认用当前登录态覆盖别名 ${alias} 吗？`,
+            default: true
+        }
+    ], {logger});
+    if (!answer?.overwrite) {
+        restoreAuthSnapshot(previousAuth);
+        logger.info(`已取消覆盖别名 ${alias}，当前登录态已恢复。`);
+        return;
+    }
+
+    store.profiles[alias] = {
+        ...existingProfile,
+        ...profile,
+        alias
+    };
+    store.current = alias;
+    saveStore(store);
+    logger.success(`别名 ${alias} 已重新登录并更新。`);
+}
+
 async function handleList(store) {
     const aliases = listProfileAliases(store).sort((left, right) => compareProfiles(store.profiles[right], store.profiles[left]));
     if (aliases.length === 0) {
@@ -165,6 +208,7 @@ async function handleList(store) {
     const concurrency = resolveListConcurrency(aliases.length);
     logger.info(`开始并发查询 ${aliases.length} 个账号额度（并发 ${concurrency}）...`);
     let changed = false;
+    const reloginHints = [];
     const rows = await mapWithConcurrency(aliases, concurrency, async alias => {
         logger.info(`[${alias}] 开始查询实时额度...`);
         const refreshed = await refreshProfileUsage(store.profiles[alias]);
@@ -174,7 +218,11 @@ async function handleList(store) {
         if (refreshed.ok) {
             logger.success(`[${alias}] 实时额度查询成功：5h=${refreshed.profile.usage?.fiveHourLimit || '-'}，周=${refreshed.profile.usage?.weeklyLimit || '-'}`);
         } else {
-            logger.warn(`[${alias}] 实时额度查询失败：${formatFetchReason(refreshed.reason)}`);
+            const needsRelogin = isReloginRequired(refreshed.reason);
+            if (needsRelogin) {
+                reloginHints.push(alias);
+            }
+            logger.warn(`[${alias}] 实时额度查询失败：${formatFetchReason(refreshed.reason)}${needsRelogin ? `，可执行 codex-cc relogin ${alias}` : ''}`);
         }
         return {
             当前: alias === store.current ? '是' : '',
@@ -196,6 +244,12 @@ async function handleList(store) {
     }
     rows.sort((left, right) => compareDisplayRows(right, left));
     renderProfileTable(rows);
+    if (reloginHints.length > 0) {
+        logger.info(`检测到 ${reloginHints.length} 个账号需要重新登录：`);
+        for (const alias of reloginHints.sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))) {
+            console.log(`  codex-cc relogin ${alias}`);
+        }
+    }
 }
 
 function handleClear() {
@@ -264,6 +318,9 @@ async function launchProfile(store, alias, codexArgs = []) {
     store.profiles[alias] = refreshed.profile;
     store.current = alias;
     saveStore(store);
+    if (!refreshed.ok && isReloginRequired(refreshed.reason)) {
+        logger.warn(`账号 ${alias} 的登录态可能已失效，可先执行 codex-cc relogin ${alias}。`);
+    }
     await writeAuthFile(refreshed.profile.auth);
     printAccountSummary(`当前账号 ${alias}`, refreshed.profile);
     const exitCode = await runCodex(codexArgs);
@@ -559,6 +616,29 @@ async function writeAuthFile(auth) {
     }
 }
 
+async function performCodexLogin(previousAuth, options = {}) {
+    const {announce = true} = options;
+    removeAuthIfExists();
+    if (announce) {
+        logger.info('准备启动 codex login，请按终端提示完成登录。');
+    }
+    const exitCode = await runCodex(['login']);
+    if (exitCode !== 0) {
+        restoreAuthIfNeeded(previousAuth);
+        logger.error(`codex login 退出码: ${exitCode}`);
+        process.exitCode = exitCode || 1;
+        return null;
+    }
+    const auth = readAuthFile();
+    if (!auth) {
+        restoreAuthIfNeeded(previousAuth);
+        logger.error('登录完成后未检测到 ~/.codex/auth.json。');
+        process.exitCode = 1;
+        return null;
+    }
+    return auth;
+}
+
 function readAuthFile() {
     if (!fs.existsSync(AUTH_FILE)) {
         return null;
@@ -592,6 +672,20 @@ function restoreAuthIfNeeded(auth) {
         fs.writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), 'utf-8');
     } catch (error) {
         logger.warn(`恢复旧 auth.json 失败: ${error.message}`);
+    }
+}
+
+function restoreAuthSnapshot(auth) {
+    try {
+        if (!auth) {
+            if (fs.existsSync(AUTH_FILE)) {
+                fs.unlinkSync(AUTH_FILE);
+            }
+            return;
+        }
+        fs.writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), 'utf-8');
+    } catch (error) {
+        logger.warn(`恢复登录态失败: ${error.message}`);
     }
 }
 
@@ -839,15 +933,44 @@ function formatFetchReason(reason) {
         return '未知错误';
     }
     if (value === 'missing_access_token') {
-        return '缺少 access_token';
+        return '缺少 access_token，请重新登录';
     }
     if (value === 'timeout') {
         return '请求超时';
+    }
+    if (value === 'http_401') {
+        return '额度接口返回 401，请重新登录';
+    }
+    if (value === 'http_402') {
+        return '额度接口返回 402，当前登录态可能已失效，请重新登录';
     }
     if (value.startsWith('http_')) {
         return `接口返回 ${value.slice(5)}`;
     }
     return value;
+}
+
+function isReloginRequired(reason) {
+    if (!reason) {
+        return false;
+    }
+    if (typeof reason === 'object') {
+        const errorCode = String(reason.errorCode || '').trim();
+        if (['refresh_token_expired', 'refresh_token_reused', 'refresh_token_invalidated', 'token_expired'].includes(errorCode)) {
+            return true;
+        }
+        const nestedReason = String(reason.reason || '').trim();
+        if (['missing_refresh_token', 'missing_access_token', 'refresh_unauthorized', 'http_401', 'http_402'].includes(nestedReason)) {
+            return true;
+        }
+        if (nestedReason.startsWith('refresh_http_')) {
+            const status = nestedReason.slice('refresh_http_'.length);
+            return ['400', '401', '403'].includes(status);
+        }
+        return false;
+    }
+    const value = String(reason).trim();
+    return ['missing_refresh_token', 'missing_access_token', 'http_401', 'http_402'].includes(value);
 }
 
 async function mapWithConcurrency(items, limit, iterator) {

@@ -104,6 +104,14 @@ codex-cc login
 
 如果当前 `~/.codex/auth.json` 已经存在登录态，但还没加入 `codex-cc` 列表，那么执行 `codex-cc`、`codex-cc list` 或 `codex-cc <别名>` 时，会自动将该账号加入列表，默认别名优先使用 `default`。
 
+### 重新登录并覆盖已有账号
+
+```bash
+codex-cc relogin 163
+```
+
+当某个别名账号出现 `401`、`402`、`refresh_token` 失效等登录态异常时，可以直接执行 `codex-cc relogin <别名>`。命令会重新拉起原生 `codex login`，登录完成后覆盖该别名对应的本地账号快照。
+
 ### 第二步：启动 Codex（交互式选择）
 
 ```bash
@@ -133,6 +141,7 @@ codex-cc work -q "帮我写一个快排算法"
 |------|------|
 | `codex-cc` | 交互式菜单，选择账号后启动 codex |
 | `codex-cc login` | 登录 Codex 并保存账号 |
+| `codex-cc relogin <别名>` | 重新登录并覆盖指定别名账号 |
 | `codex-cc list` | 查看所有账号及实时额度 |
 | `codex-cc clear` | 删除当前 `~/.codex/auth.json`（退出登录） |
 | `codex-cc rename <旧别名> <新别名>` | 重命名已保存账号别名 |
@@ -147,6 +156,7 @@ codex-cc work -q "帮我写一个快排算法"
 - `codex-cc list` 和 `codex-cc <别名>` 在查询额度前，会先检查本地 `access_token` 是否已过期；若已过期，或 `last_refresh` 距今超过 8 天，会优先尝试使用 `refresh_token` 自动刷新。
 - 若额度接口返回 `401`，脚本会按 Codex managed auth 的方式再尝试一次 `refresh_token` 刷新，并使用新 token 重试一次额度查询。
 - 当刷新失败时，日志会优先展示明确原因，例如 `token_expired`、`refresh_token_reused`、`refresh_token_expired`，而不是只显示“接口返回 401”。
+- 若列表或启动时命中 `401`、`402`、`refresh_token` 失效等场景，日志会明确提示执行 `codex-cc relogin <别名>`。
 
 ---
 
@@ -232,7 +242,7 @@ npm install -g @openai/codex
 - 检查网络是否能访问 `chatgpt.com`
 - 如需代理，设置 `CODEX_ACC_PROXY` 环境变量
 - 账号 token 可能已过期；当前版本会先自动尝试 `refresh_token` 刷新
-- 如果日志里出现 `refresh_token_reused`、`refresh_token_expired` 或 `refresh_token_invalidated`，请重新执行 `codex-cc login`
+- 如果日志里出现 `refresh_token_reused`、`refresh_token_expired`、`refresh_token_invalidated`，或者出现 `401/402` 重新登录提示，请执行 `codex-cc relogin <别名>`
 
 **Q: 如何删除某个账号？**
 
