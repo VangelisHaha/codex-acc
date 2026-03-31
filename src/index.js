@@ -9,8 +9,10 @@ import {
     extractAccountInfo,
     extractAuthState,
     fetchRealtimeUsage,
+    isAuthUnauthorizedFailure,
     normalizeUsageText,
-    pickRealtimeLimits
+    pickRealtimeLimits,
+    refreshAuthTokenIfNeeded
 } from './account.js';
 import {createLogger} from '../utils/Logger.js';
 import {safePrompt} from '../utils/PromptUtil.js';
@@ -258,11 +260,11 @@ async function launchProfile(store, alias, codexArgs = []) {
         process.exitCode = 1;
         return;
     }
-    await writeAuthFile(profile.auth);
     const refreshed = await refreshProfileUsage(profile);
     store.profiles[alias] = refreshed.profile;
     store.current = alias;
     saveStore(store);
+    await writeAuthFile(refreshed.profile.auth);
     printAccountSummary(`当前账号 ${alias}`, refreshed.profile);
     const exitCode = await runCodex(codexArgs);
     if (exitCode !== 0) {
@@ -407,14 +409,49 @@ async function refreshProfileUsage(profile) {
         },
         usage: normalizeUsageSnapshot(profile.usage)
     };
+    let changed = false;
+    const proactiveRefresh = await refreshAuthTokenIfNeeded(nextProfile.auth, {timeoutMs: 15000});
+    if (proactiveRefresh.ok && proactiveRefresh.changed) {
+        nextProfile.auth = proactiveRefresh.auth;
+        nextProfile.account = {
+            ...extractAccountInfo(nextProfile.auth),
+            ...(nextProfile.account || {})
+        };
+        changed = true;
+    }
     const fetchedAt = new Date().toISOString();
-    const realtime = await fetchRealtimeUsage(nextProfile.auth, {timeoutMs: 15000});
+    let realtime = await fetchRealtimeUsage(nextProfile.auth, {timeoutMs: 15000});
+    if (!realtime.ok && isAuthUnauthorizedFailure(realtime)) {
+        const recoveryRefresh = await refreshAuthTokenIfNeeded(nextProfile.auth, {
+            timeoutMs: 15000,
+            force: true
+        });
+        if (recoveryRefresh.ok && recoveryRefresh.changed) {
+            nextProfile.auth = recoveryRefresh.auth;
+            nextProfile.account = {
+                ...extractAccountInfo(nextProfile.auth),
+                ...(nextProfile.account || {})
+            };
+            changed = true;
+        }
+        if (recoveryRefresh.ok) {
+            realtime = await fetchRealtimeUsage(nextProfile.auth, {timeoutMs: 15000});
+        } else {
+            return {
+                profile: nextProfile,
+                changed,
+                ok: false,
+                reason: recoveryRefresh,
+                fetchedAt
+            };
+        }
+    }
     if (!realtime.ok) {
         return {
             profile: nextProfile,
-            changed: false,
+            changed,
             ok: false,
-            reason: realtime.reason || 'fetch_failed',
+            reason: realtime,
             fetchedAt
         };
     }
@@ -425,7 +462,8 @@ async function refreshProfileUsage(profile) {
         source: 'realtime_usage_api',
         updatedAt: fetchedAt
     };
-    const changed = nextUsage.fiveHourLimit !== nextProfile.usage.fiveHourLimit
+    changed = changed
+        || nextUsage.fiveHourLimit !== nextProfile.usage.fiveHourLimit
         || nextUsage.weeklyLimit !== nextProfile.usage.weeklyLimit;
     nextProfile.usage = nextUsage;
     nextProfile.updatedAt = fetchedAt;
@@ -754,7 +792,49 @@ function renderProfileTable(rows) {
 }
 
 function formatFetchReason(reason) {
-    const value = String(reason || '').trim();
+    if (!reason) {
+        return '未知错误';
+    }
+    if (typeof reason === 'object') {
+        if (reason.errorCode === 'refresh_token_expired') {
+            return 'refresh_token 已过期，请重新登录';
+        }
+        if (reason.errorCode === 'refresh_token_reused') {
+            return 'refresh_token 已被使用，请重新登录';
+        }
+        if (reason.errorCode === 'refresh_token_invalidated') {
+            return 'refresh_token 已失效，请重新登录';
+        }
+        if (reason.errorCode === 'token_expired') {
+            return 'access_token 已过期，已尝试刷新但失败，请重新登录';
+        }
+        if (reason.reason === 'missing_refresh_token') {
+            return '缺少 refresh_token，请重新登录';
+        }
+        if (reason.reason === 'refresh_timeout') {
+            return '刷新 access_token 超时';
+        }
+        if (reason.reason === 'refresh_invalid_json') {
+            return '刷新 access_token 返回了非法响应';
+        }
+        if (reason.reason === 'refresh_failed' && reason.errorMessage) {
+            return `刷新 access_token 失败：${reason.errorMessage}`;
+        }
+        if (reason.reason === 'refresh_unauthorized') {
+            return reason.errorMessage || '刷新 access_token 被拒绝，请重新登录';
+        }
+        if (reason.reason && String(reason.reason).startsWith('refresh_http_')) {
+            return reason.errorMessage || `刷新 access_token 接口返回 ${String(reason.reason).slice('refresh_http_'.length)}`;
+        }
+        if (reason.errorMessage) {
+            if (reason.errorCode) {
+                return `${reason.errorMessage}（${reason.errorCode}）`;
+            }
+            return reason.errorMessage;
+        }
+        return formatFetchReason(reason.reason);
+    }
+    const value = String(reason).trim();
     if (!value) {
         return '未知错误';
     }

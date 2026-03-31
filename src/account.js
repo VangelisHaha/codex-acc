@@ -1,6 +1,10 @@
 import fetch from 'node-fetch';
 import {getProxyAgent, getVpnAwareAgent, resolveProxyUrl} from '../utils/ProxyAgentUtil.js';
 
+const TOKEN_REFRESH_INTERVAL_DAYS = 8;
+const REFRESH_TOKEN_URL = 'https://auth.openai.com/oauth/token';
+const REFRESH_TOKEN_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+
 function normalize(value) {
     if (value === null || value === undefined) {
         return '';
@@ -66,6 +70,98 @@ export function safeJsonParse(text) {
     } catch (error) {
         return null;
     }
+}
+
+function cloneAuth(auth) {
+    if (!auth || typeof auth !== 'object' || Array.isArray(auth)) {
+        return {};
+    }
+    return JSON.parse(JSON.stringify(auth));
+}
+
+function parseJwtExpiration(token) {
+    const payload = decodeJwtPayload(token);
+    const exp = Number(payload?.exp ?? 0);
+    return Number.isFinite(exp) && exp > 0 ? exp : null;
+}
+
+function parseLastRefreshAt(auth) {
+    const timeValue = Date.parse(String(auth?.last_refresh || ''));
+    return Number.isFinite(timeValue) ? timeValue : null;
+}
+
+function isJwtExpired(token) {
+    const exp = parseJwtExpiration(token);
+    if (!exp) {
+        return false;
+    }
+    return exp * 1000 <= Date.now();
+}
+
+function shouldProactivelyRefresh(auth) {
+    const refreshToken = normalize(auth?.tokens?.refresh_token);
+    if (!refreshToken) {
+        return false;
+    }
+    const accessToken = normalize(auth?.tokens?.access_token);
+    if (accessToken && isJwtExpired(accessToken)) {
+        return true;
+    }
+    const lastRefreshAt = parseLastRefreshAt(auth);
+    if (!lastRefreshAt) {
+        return false;
+    }
+    return lastRefreshAt < Date.now() - TOKEN_REFRESH_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function parseErrorDetails(rawText) {
+    const payload = safeJsonParse(rawText);
+    const error = payload?.error;
+    return {
+        message: normalize(error?.message || payload?.message),
+        code: normalize(error?.code || payload?.code),
+        type: normalize(error?.type || payload?.type)
+    };
+}
+
+function buildFailureResult(reason, extra = {}) {
+    return {
+        ok: false,
+        reason,
+        ...extra
+    };
+}
+
+function mergeRefreshedAuth(auth, payload = {}) {
+    const nextAuth = cloneAuth(auth);
+    const nextTokens = {
+        ...(nextAuth?.tokens || {})
+    };
+    const accessToken = normalize(payload?.access_token);
+    const idToken = normalize(payload?.id_token);
+    const refreshToken = normalize(payload?.refresh_token);
+    const accessPayload = decodeJwtPayload(accessToken || nextTokens.access_token || '');
+    const idPayload = decodeJwtPayload(idToken || nextTokens.id_token || '');
+    const authInfo = accessPayload?.['https://api.openai.com/auth']
+        || idPayload?.['https://api.openai.com/auth']
+        || {};
+    if (accessToken) {
+        nextTokens.access_token = accessToken;
+    }
+    if (idToken) {
+        nextTokens.id_token = idToken;
+    }
+    if (refreshToken) {
+        nextTokens.refresh_token = refreshToken;
+    }
+    nextTokens.account_id = normalize(
+        payload?.account_id
+        || authInfo?.chatgpt_account_id
+        || nextTokens.account_id
+    );
+    nextAuth.tokens = nextTokens;
+    nextAuth.last_refresh = new Date().toISOString();
+    return nextAuth;
 }
 
 function formatResetAt(resetAt) {
@@ -249,6 +345,114 @@ export function extractAccountInfo(auth) {
     };
 }
 
+export function isAuthUnauthorizedFailure(result) {
+    if (!result || typeof result !== 'object') {
+        return false;
+    }
+    return result.reason === 'http_401' || result.errorCode === 'token_expired';
+}
+
+export async function refreshAuthToken(auth, options = {}) {
+    const {
+        timeoutMs = 8000,
+        refreshTokenUrl = REFRESH_TOKEN_URL
+    } = options;
+    const refreshToken = normalize(auth?.tokens?.refresh_token);
+    if (!refreshToken) {
+        return buildFailureResult('missing_refresh_token');
+    }
+    const proxyUrl = resolveProxyUrl();
+    const proxyAgent = getProxyAgent(proxyUrl);
+    const vpnAgent = getVpnAwareAgent();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(refreshTokenUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'codex-cli'
+            },
+            body: JSON.stringify({
+                client_id: REFRESH_TOKEN_CLIENT_ID,
+                grant_type: 'refresh_token',
+                refresh_token: refreshToken
+            }),
+            signal: controller.signal,
+            ...(proxyAgent ? {agent: proxyAgent} : {}),
+            ...(!proxyAgent && vpnAgent ? {agent: vpnAgent} : {})
+        });
+        const text = await response.text();
+        if (!response.ok) {
+            const details = parseErrorDetails(text);
+            return buildFailureResult(response.status === 401 ? 'refresh_unauthorized' : `refresh_http_${response.status}`, {
+                status: response.status,
+                errorCode: details.code,
+                errorMessage: details.message,
+                errorType: details.type,
+                output: stripAnsi(text).slice(0, 500),
+                debug: {
+                    proxyUrl,
+                    refreshTokenUrl
+                }
+            });
+        }
+        const payload = safeJsonParse(text);
+        if (!payload) {
+            return buildFailureResult('refresh_invalid_json', {
+                output: stripAnsi(text).slice(0, 500),
+                debug: {
+                    proxyUrl,
+                    refreshTokenUrl
+                }
+            });
+        }
+        const nextAuth = mergeRefreshedAuth(auth, payload);
+        const changed = normalize(nextAuth?.tokens?.access_token) !== normalize(auth?.tokens?.access_token)
+            || normalize(nextAuth?.tokens?.refresh_token) !== normalize(auth?.tokens?.refresh_token)
+            || normalize(nextAuth?.tokens?.id_token) !== normalize(auth?.tokens?.id_token)
+            || normalize(nextAuth?.tokens?.account_id) !== normalize(auth?.tokens?.account_id);
+        return {
+            ok: true,
+            auth: nextAuth,
+            changed,
+            payload,
+            debug: {
+                proxyUrl,
+                refreshTokenUrl
+            }
+        };
+    } catch (error) {
+        return buildFailureResult(error?.name === 'AbortError' ? 'refresh_timeout' : 'refresh_failed', {
+            errorMessage: normalize(error?.message || 'refresh_failed'),
+            debug: {
+                proxyUrl,
+                refreshTokenUrl
+            }
+        });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+export async function refreshAuthTokenIfNeeded(auth, options = {}) {
+    const {force = false} = options;
+    if (!force && !shouldProactivelyRefresh(auth)) {
+        return {
+            ok: true,
+            auth,
+            changed: false,
+            attempted: false,
+            reason: ''
+        };
+    }
+    const refreshed = await refreshAuthToken(auth, options);
+    return {
+        ...refreshed,
+        attempted: true
+    };
+}
+
 export async function fetchRealtimeUsage(auth, options = {}) {
     const {
         timeoutMs = 8000,
@@ -280,9 +484,14 @@ export async function fetchRealtimeUsage(auth, options = {}) {
         });
         const text = await response.text();
         if (!response.ok) {
+            const details = parseErrorDetails(text);
             return {
                 ok: false,
                 reason: `http_${response.status}`,
+                status: response.status,
+                errorCode: details.code,
+                errorMessage: details.message,
+                errorType: details.type,
                 output: stripAnsi(text).slice(0, 500),
                 debug: {
                     proxyUrl,

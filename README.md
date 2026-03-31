@@ -142,6 +142,14 @@ codex-cc work -q "帮我写一个快排算法"
 
 ---
 
+## 登录态保活 | Auth Keepalive
+
+- `codex-cc list` 和 `codex-cc <别名>` 在查询额度前，会先检查本地 `access_token` 是否已过期；若已过期，或 `last_refresh` 距今超过 8 天，会优先尝试使用 `refresh_token` 自动刷新。
+- 若额度接口返回 `401`，脚本会按 Codex managed auth 的方式再尝试一次 `refresh_token` 刷新，并使用新 token 重试一次额度查询。
+- 当刷新失败时，日志会优先展示明确原因，例如 `token_expired`、`refresh_token_reused`、`refresh_token_expired`，而不是只显示“接口返回 401”。
+
+---
+
 ## 额度展示说明 | Quota Display
 
 执行 `codex-cc list` 或启动时，会实时查询每个账号的额度并以表格展示：
@@ -223,7 +231,8 @@ npm install -g @openai/codex
 
 - 检查网络是否能访问 `chatgpt.com`
 - 如需代理，设置 `CODEX_ACC_PROXY` 环境变量
-- 账号 token 可能已过期，重新执行 `codex-cc login` 刷新
+- 账号 token 可能已过期；当前版本会先自动尝试 `refresh_token` 刷新
+- 如果日志里出现 `refresh_token_reused`、`refresh_token_expired` 或 `refresh_token_invalidated`，请重新执行 `codex-cc login`
 
 **Q: 如何删除某个账号？**
 
