@@ -28,7 +28,8 @@
     "cli-table3": "^0.6.5",
     "inquirer": "^12.9.4",
     "node-fetch": "^3.3.2",
-    "proxy-agent": "^6.4.0"
+    "proxy-agent": "^6.4.0",
+    "string-width": "^7.2.0"
   },
   "files": [
     "bin",
